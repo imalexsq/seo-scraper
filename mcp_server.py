@@ -1045,3 +1045,298 @@ if __name__ == "__main__":
     print(f"OAuth DB:   {OAUTH_DB}")
     print(f"OAuth: enabled (auto-approve, PKCE required)")
     mcp.run(transport="streamable-http")
+
+
+# ---------------------------------------------------------------------------
+# NEW: Competitor Intelligence Tools (added 2026-04-27)
+# ---------------------------------------------------------------------------
+
+class SerpHistoryInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    query: str = Field(..., description="The exact search query to get history for", min_length=2)
+    limit: Optional[int] = Field(default=20, description="Max snapshots to return (1-52)", ge=1, le=52)
+
+
+class CompetitorProductsInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    domain: Optional[str] = Field(default=None, description="Filter by competitor domain (e.g. 'gorjana.com'). Omit for all.")
+    limit: Optional[int] = Field(default=30, description="Max products to return (1-100)", ge=1, le=100)
+    only_changed: Optional[bool] = Field(default=False, description="Only return products where price or description changed since last scrape")
+
+
+class PriceHistoryInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    url: str = Field(..., description="Full competitor product URL", min_length=10)
+
+
+@mcp.tool(
+    name="scraper_get_serp_history",
+    annotations={
+        "title": "Get SERP Position History",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def scraper_get_serp_history(params: SerpHistoryInput) -> str:
+    """Get week-by-week SERP position history for a search query.
+
+    Shows how our position (and competitor positions) have changed over time
+    for a tracked keyword. Use this to measure whether SEO or blogging efforts
+    are moving the needle in search rankings.
+
+    Args:
+        params (SerpHistoryInput):
+            - query (str): The exact search query
+            - limit (int): Max snapshots to return (default 20)
+
+    Returns:
+        str: JSON with query, our_url, snapshots list with scraped_at + our_position,
+             trend (improving/declining/stable/not_ranked), weeks_tracked
+    """
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT ss.id, ss.scraped_at, ss.our_position, ss.total_results, ss.our_url,
+                   GROUP_CONCAT(ssr.domain || ':' || ssr.position, '|') as top_domains
+            FROM serp_snapshots ss
+            LEFT JOIN serp_snapshot_results ssr
+                ON ssr.snapshot_id = ss.id AND ssr.is_ours = 0 AND ssr.position <= 5
+            WHERE ss.query = ?
+            GROUP BY ss.id
+            ORDER BY ss.scraped_at DESC
+            LIMIT ?
+        """, (params.query, params.limit)).fetchall()
+
+    if not rows:
+        with _db() as conn:
+            similar = [
+                r["query"] for r in conn.execute(
+                    "SELECT DISTINCT query FROM serp_snapshots WHERE query LIKE ? LIMIT 5",
+                    (f"%{params.query.split()[0]}%",)
+                ).fetchall()
+            ]
+        return json.dumps({
+            "error": f"No SERP history found for '{params.query}'",
+            "similar_queries": similar,
+            "hint": "Use scraper_get_stats to see tracked keywords, or run scraper_run_pipeline to collect data.",
+        })
+
+    our_url = rows[0]["our_url"] if rows else None
+    snapshots = []
+    for r in rows:
+        top_5 = []
+        if r["top_domains"]:
+            for pair in r["top_domains"].split("|"):
+                if ":" in pair:
+                    d, pos = pair.rsplit(":", 1)
+                    try:
+                        top_5.append({"domain": d, "position": int(pos)})
+                    except ValueError:
+                        pass
+        snapshots.append({
+            "scraped_at":    r["scraped_at"],
+            "our_position":  r["our_position"],
+            "total_results": r["total_results"],
+            "top_5_domains": top_5,
+        })
+
+    # Compute trend: compare oldest vs newest our_position
+    positions = [s["our_position"] for s in snapshots if s["our_position"] is not None]
+    if not positions:
+        trend = "not_ranked"
+    elif len(positions) == 1:
+        trend = "stable"
+    else:
+        first = positions[-1]  # oldest (list is DESC)
+        last  = positions[0]   # newest
+        if last < first:
+            trend = "improving"
+        elif last > first:
+            trend = "declining"
+        else:
+            trend = "stable"
+
+    return json.dumps({
+        "query":         params.query,
+        "our_url":       our_url,
+        "weeks_tracked": len(snapshots),
+        "trend":         trend,
+        "current_position": positions[0] if positions else None,
+        "snapshots":     snapshots,
+    }, indent=2, default=str)
+
+
+@mcp.tool(
+    name="scraper_get_competitor_products",
+    annotations={
+        "title": "Get Competitor Products",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def scraper_get_competitor_products(params: CompetitorProductsInput) -> str:
+    """Get competitor product details with price, description, and materials.
+
+    Returns the latest scraped details for competitor product URLs discovered
+    through SERP results. Filter by domain to focus on a specific competitor,
+    or set only_changed=true to see what changed since the last scrape.
+
+    Args:
+        params (CompetitorProductsInput):
+            - domain (str|None): Filter by competitor domain
+            - limit (int): Max results (default 30)
+            - only_changed (bool): Only show products with recent changes
+
+    Returns:
+        str: JSON with total, domain_filter, products list with full product details
+    """
+    only_changed_int = 1 if params.only_changed else 0
+
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT cp.url, cp.first_seen_at, cp.last_scraped_at,
+                   c.domain, c.name,
+                   ps.title, ps.price_usd, ps.price_raw, ps.description,
+                   ps.metal_type, ps.karat, ps.materials, ps.availability,
+                   ps.price_changed, ps.description_changed, ps.scraped_at as snapshot_at
+            FROM competitor_products cp
+            JOIN competitors c ON c.id = cp.competitor_id
+            LEFT JOIN product_snapshots ps ON ps.id = (
+                SELECT id FROM product_snapshots
+                WHERE product_id = cp.id
+                ORDER BY scraped_at DESC LIMIT 1
+            )
+            WHERE (? IS NULL OR c.domain = ?)
+            AND (? = 0 OR (ps.price_changed = 1 OR ps.description_changed = 1))
+            ORDER BY ps.price_usd ASC
+            LIMIT ?
+        """, (params.domain, params.domain, only_changed_int, params.limit)).fetchall()
+
+    products = []
+    for r in rows:
+        products.append({
+            "url":                 r["url"],
+            "domain":              r["domain"],
+            "name":                r["name"] or r["domain"],
+            "title":               r["title"] or "",
+            "price_usd":           r["price_usd"],
+            "price_raw":           r["price_raw"] or "",
+            "description":         r["description"] or "",
+            "metal_type":          r["metal_type"] or "unknown",
+            "karat":               r["karat"] or "unknown",
+            "materials":           r["materials"] or "",
+            "availability":        r["availability"] or "unknown",
+            "price_changed":       bool(r["price_changed"]),
+            "description_changed": bool(r["description_changed"]),
+            "first_seen_at":       r["first_seen_at"],
+            "last_scraped_at":     r["last_scraped_at"],
+            "snapshot_at":         r["snapshot_at"],
+        })
+
+    return json.dumps({
+        "total":         len(products),
+        "domain_filter": params.domain,
+        "only_changed":  params.only_changed,
+        "products":      products,
+    }, indent=2, default=str)
+
+
+@mcp.tool(
+    name="scraper_get_price_history",
+    annotations={
+        "title": "Get Product Price History",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def scraper_get_price_history(params: PriceHistoryInput) -> str:
+    """Get full price and description history for a specific competitor product URL.
+
+    Shows every weekly snapshot for a product — track price changes, description
+    rewrites, and availability changes over time. Use this to understand competitor
+    pricing strategy and how they adjust their listings.
+
+    Args:
+        params (PriceHistoryInput):
+            - url (str): Full competitor product URL
+
+    Returns:
+        str: JSON with url, domain, price_range, total_snapshots, price_changes_detected,
+             and chronological snapshots list
+    """
+    with _db() as conn:
+        # Get competitor info
+        comp_row = conn.execute("""
+            SELECT cp.id as product_id, c.domain, c.name
+            FROM competitor_products cp
+            JOIN competitors c ON c.id = cp.competitor_id
+            WHERE cp.url = ?
+        """, (params.url,)).fetchone()
+
+        if not comp_row:
+            return json.dumps({
+                "error": f"URL not found in competitor_products: {params.url}",
+                "hint": "This URL may not have been scraped yet. Check scraper_get_competitor_products to see tracked URLs.",
+            })
+
+        rows = conn.execute("""
+            SELECT ps.scraped_at, ps.price_usd, ps.price_raw, ps.title,
+                   ps.description, ps.metal_type, ps.karat, ps.materials,
+                   ps.availability, ps.price_changed, ps.description_changed
+            FROM product_snapshots ps
+            WHERE ps.product_id = ?
+            ORDER BY ps.scraped_at ASC
+        """, (comp_row["product_id"],)).fetchall()
+
+    if not rows:
+        return json.dumps({
+            "url":    params.url,
+            "domain": comp_row["domain"],
+            "status": "no_snapshots",
+            "hint":   "This product was found in SERP but hasn't been scraped yet. Run scraper_run_pipeline to collect product data.",
+        })
+
+    snapshots = []
+    prices = []
+    price_changes = 0
+    for r in rows:
+        if r["price_usd"] is not None:
+            prices.append(r["price_usd"])
+        if r["price_changed"]:
+            price_changes += 1
+        snapshots.append({
+            "scraped_at":          r["scraped_at"],
+            "title":               r["title"] or "",
+            "price_usd":           r["price_usd"],
+            "price_raw":           r["price_raw"] or "",
+            "description":         r["description"] or "",
+            "metal_type":          r["metal_type"] or "unknown",
+            "karat":               r["karat"] or "unknown",
+            "materials":           r["materials"] or "",
+            "availability":        r["availability"] or "unknown",
+            "price_changed":       bool(r["price_changed"]),
+            "description_changed": bool(r["description_changed"]),
+        })
+
+    latest = snapshots[-1] if snapshots else {}
+    price_range = {
+        "min":     min(prices) if prices else None,
+        "max":     max(prices) if prices else None,
+        "current": latest.get("price_usd"),
+    }
+
+    return json.dumps({
+        "url":                     params.url,
+        "domain":                  comp_row["domain"],
+        "name":                    comp_row["name"] or comp_row["domain"],
+        "total_snapshots":         len(snapshots),
+        "price_changes_detected":  price_changes,
+        "price_range":             price_range,
+        "snapshots":               snapshots,
+    }, indent=2, default=str)
+
