@@ -26,6 +26,7 @@ from db import init_db, get_conn
 from crawlers.serp_crawler import scrape_serp, save_serp_results
 from extraction.classifier import classify_unprocessed
 from monitoring.delta import detect_deltas
+from delta_alert import run_delta_alert
 from crawlers.etsy_serp_crawler import scrape_etsy_serp, save_etsy_serp_results
 from extraction.etsy_extractor import process_etsy_listings
 
@@ -305,6 +306,9 @@ def main():
     if not args.skip_delta:
         print('\nStep 4: Delta detection')
         detect_deltas()
+
+    print('\nStep 4b: Telegram delta alert')
+    run_delta_alert()
 
     if args.etsy:
         print(f'\nStep 5: Etsy SERP crawl from {args.etsy_keywords}')
