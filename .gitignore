@@ -10,6 +10,12 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+dist/
+build/
+.eggs/
+
+# Crawlee runtime storage
+storage/
 
 # Editor
 .DS_Store
