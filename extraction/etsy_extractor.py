@@ -22,7 +22,7 @@ BRIGHTDATA_ZONE    = os.environ.get('BRIGHTDATA_ZONE', 'web_unlocker1')
 BRIGHTDATA_API_URL = 'https://api.brightdata.com/request'
 
 
-def _fetch_html(url: str, retries: int = 3) -> str:
+def _fetch_html(url: str, retries: int = 1) -> str:
     if not BRIGHTDATA_API_KEY:
         return ''
     payload = json.dumps({
@@ -39,7 +39,7 @@ def _fetch_html(url: str, retries: int = 3) -> str:
             req = urllib.request.Request(
                 BRIGHTDATA_API_URL, data=payload, headers=headers, method='POST'
             )
-            with urllib.request.urlopen(req, timeout=45) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 return resp.read().decode('utf-8', errors='replace')
         except Exception as e:
             print(f'    fetch attempt {attempt}/{retries}: {e}')

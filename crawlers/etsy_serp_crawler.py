@@ -52,8 +52,28 @@ def _extract_listing_id(url: str) -> str:
     return m.group(1) if m else ''
 
 
+def _extract_shop_map(html: str) -> dict:
+    """Build listing_id → shop_name from inline Etsy JSON blobs."""
+    shop_map = {}
+    # listing_id before shop_name
+    for m in re.finditer(
+        r'"listing_id"\s*:\s*["\']?(\d+)["\']?.{0,400}?"shop_name"\s*:\s*"([^"]+)"',
+        html, re.DOTALL
+    ):
+        shop_map[m.group(1)] = m.group(2)
+    # shop_name before listing_id
+    for m in re.finditer(
+        r'"shop_name"\s*:\s*"([^"]+)".{0,400}?"listing_id"\s*:\s*["\']?(\d+)["\']?',
+        html, re.DOTALL
+    ):
+        if m.group(2) not in shop_map:
+            shop_map[m.group(2)] = m.group(1)
+    return shop_map
+
+
 def _parse_etsy_serp_html(html: str, query: str) -> list:
     results = []
+    shop_map = _extract_shop_map(html)
 
     # Strategy 1: JSON-LD ItemList (Etsy embeds this for SEO)
     jsonld_blocks = re.findall(
@@ -92,6 +112,10 @@ def _parse_etsy_serp_html(html: str, query: str) -> list:
                         price = None
 
                 listing_id = _extract_listing_id(url)
+                # shop from JSON-LD brand field, else inline JS map
+                brand = thing.get('brand', {})
+                shop = (brand.get('name') if isinstance(brand, dict) else None) or shop_map.get(listing_id)
+
                 results.append({
                     'query':       query,
                     'position':    int(position),
@@ -99,7 +123,7 @@ def _parse_etsy_serp_html(html: str, query: str) -> list:
                     'url':         url.split('?')[0],
                     'title':       title,
                     'price_usd':   price,
-                    'shop':        None,
+                    'shop':        shop,
                     'reviews':     None,
                     'star_seller': False,
                 })
@@ -146,6 +170,9 @@ def _parse_etsy_serp_html(html: str, query: str) -> list:
 
         star_seller = 'star-seller' in snippet.lower() or 'star_seller' in snippet.lower()
 
+        shop_m = re.search(r'href=["\'][^"\']*?/shop/([A-Za-z0-9_]+)[/"?\']', snippet)
+        shop = shop_m.group(1) if shop_m else shop_map.get(lid)
+
         results.append({
             'query':       query,
             'position':    len(results) + 1,
@@ -153,7 +180,7 @@ def _parse_etsy_serp_html(html: str, query: str) -> list:
             'url':         url.split('?')[0],
             'title':       title,
             'price_usd':   price,
-            'shop':        None,
+            'shop':        shop,
             'reviews':     None,
             'star_seller': star_seller,
         })
