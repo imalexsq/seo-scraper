@@ -932,6 +932,197 @@ async def scraper_get_delta_changes() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool: list_etsy_serp
+# ---------------------------------------------------------------------------
+
+class EtsyQueryInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    query: str = Field(
+        ...,
+        description="Etsy search query to look up (e.g. '18k gold turquoise bracelet')",
+        min_length=2,
+    )
+    limit: Optional[int] = Field(default=20, ge=1, le=100)
+
+
+@mcp.tool(
+    name="scraper_list_etsy_serp",
+    annotations={
+        "title": "List Etsy SERP Results",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def scraper_list_etsy_serp(params: EtsyQueryInput) -> str:
+    """List Etsy search results for a specific query.
+
+    Returns ranked Etsy listings crawled for the query, including title, price,
+    shop name, review count, and star-seller status. Use this to see what buyers
+    see when searching for a product on Etsy.
+
+    Args:
+        params (EtsyQueryInput):
+            - query (str): The Etsy search query
+            - limit (int): Max results (default 20)
+
+    Returns:
+        str: JSON with query, total, results list (position, url, title, price_usd,
+             shop, reviews, star_seller, classified, metal_type, karat)
+    """
+    with _db() as conn:
+        try:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM etsy_serp_results WHERE query = ?", (params.query,)
+            ).fetchone()[0]
+
+            rows = conn.execute("""
+                SELECT s.position, s.url, s.title, s.price_usd, s.shop,
+                       s.reviews, s.star_seller,
+                       l.metal_type, l.karat, l.confidence
+                FROM etsy_serp_results s
+                LEFT JOIN etsy_listings l ON s.url = l.url
+                WHERE s.query = ?
+                ORDER BY s.position ASC
+                LIMIT ?
+            """, (params.query, params.limit)).fetchall()
+        except Exception as e:
+            return json.dumps({"error": f"DB error: {e}", "hint": "Run pipeline --etsy to populate Etsy data."})
+
+    if total == 0:
+        with _db() as conn:
+            similar = [
+                r["query"] for r in conn.execute(
+                    "SELECT DISTINCT query FROM etsy_serp_results WHERE query LIKE ? LIMIT 5",
+                    (f"%{params.query.split()[0]}%",)
+                ).fetchall()
+            ]
+        return json.dumps({
+            "error": f"No Etsy SERP results found for '{params.query}'",
+            "similar_queries": similar,
+            "hint": "Run pipeline.py --etsy to scrape Etsy search results.",
+        })
+
+    results = []
+    for r in rows:
+        results.append({
+            "position":    r["position"],
+            "url":         r["url"],
+            "title":       r["title"] or "",
+            "price_usd":   r["price_usd"],
+            "shop":        r["shop"] or "",
+            "reviews":     r["reviews"],
+            "star_seller": bool(r["star_seller"]),
+            "classified":  r["metal_type"] is not None,
+            "metal_type":  r["metal_type"] or "not classified",
+            "karat":       r["karat"] or "",
+            "confidence":  r["confidence"] or "",
+        })
+
+    return json.dumps({
+        "query":   params.query,
+        "total":   total,
+        "count":   len(results),
+        "results": results,
+    }, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_etsy_competitor_intel
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="scraper_get_etsy_competitor_intel",
+    annotations={
+        "title": "Get Etsy Competitor Intelligence",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def scraper_get_etsy_competitor_intel(params: EtsyQueryInput) -> str:
+    """Get full competitor intelligence for an Etsy search query.
+
+    Joins Etsy SERP ranking data with listing metadata and metal classification.
+    Returns each competitor's rank, price, shop, materials, tags, and metal type.
+
+    Args:
+        params (EtsyQueryInput):
+            - query (str): The Etsy search query
+            - limit (int): Max competitors to return (default 20)
+
+    Returns:
+        str: JSON with competitors ranked by position, each with full metadata
+             and metal classification. Includes metal_summary counts.
+    """
+    with _db() as conn:
+        try:
+            rows = conn.execute("""
+                SELECT s.position, s.url, s.title AS serp_title, s.price_usd AS serp_price,
+                       s.shop AS serp_shop, s.reviews, s.star_seller,
+                       l.title AS listing_title, l.price_usd AS listing_price,
+                       l.shop AS listing_shop, l.materials, l.tags,
+                       l.favorites, l.metal_type, l.karat, l.confidence
+                FROM etsy_serp_results s
+                LEFT JOIN etsy_listings l ON s.url = l.url
+                WHERE s.query = ?
+                ORDER BY s.position ASC
+                LIMIT ?
+            """, (params.query, params.limit)).fetchall()
+        except Exception as e:
+            return json.dumps({"error": f"DB error: {e}", "hint": "Run pipeline --etsy to populate Etsy data."})
+
+    if not rows:
+        return json.dumps({
+            "error": f"No data for '{params.query}'",
+            "hint": "Run pipeline.py --etsy --etsy-keywords data/etsy_keywords.json",
+        })
+
+    competitors = []
+    metal_counts: dict = {}
+    for r in rows:
+        title = r["listing_title"] or r["serp_title"] or ""
+        price = r["listing_price"] or r["serp_price"]
+        shop  = r["listing_shop"] or r["serp_shop"] or ""
+        metal = r["metal_type"] or "not_classified"
+        metal_counts[metal] = metal_counts.get(metal, 0) + 1
+
+        try:
+            materials = json.loads(r["materials"] or "[]")
+        except Exception:
+            materials = []
+        try:
+            tags = json.loads(r["tags"] or "[]")
+        except Exception:
+            tags = []
+
+        competitors.append({
+            "position":    r["position"],
+            "url":         r["url"],
+            "title":       title,
+            "price_usd":   price,
+            "shop":        shop,
+            "reviews":     r["reviews"],
+            "favorites":   r["favorites"],
+            "star_seller": bool(r["star_seller"]),
+            "metal_type":  metal,
+            "karat":       r["karat"] or "",
+            "confidence":  r["confidence"] or "",
+            "materials":   materials,
+            "tags":        tags[:10],
+        })
+
+    return json.dumps({
+        "query":         params.query,
+        "total":         len(competitors),
+        "metal_summary": metal_counts,
+        "competitors":   competitors,
+    }, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
 # Tool: run_pipeline
 # ---------------------------------------------------------------------------
 
@@ -1001,7 +1192,7 @@ async def scraper_run_pipeline(params: RunPipelineInput) -> str:
     ] + keywords_arg
 
     def _run():
-        global _pipeline_running
+        log_path = "/root/pipeline_run.log"
         try:
             env = os.environ.copy()
             for line in env_path.read_text().splitlines():
@@ -1009,19 +1200,28 @@ async def scraper_run_pipeline(params: RunPipelineInput) -> str:
                 if line and not line.startswith("#") and "=" in line:
                     k, _, v = line.partition("=")
                     env[k.strip()] = v.strip()
-            subprocess.run(
-                cmd,
-                cwd="/root/seo-scraper",
-                env=env,
-                capture_output=True,
-                timeout=600,
-            )
-        except Exception:
-            pass
+            env["PYTHONUNBUFFERED"] = "1"
+            with open(log_path, "a") as logf:
+                print("", file=logf)
+                print("=== Pipeline started " + datetime.utcnow().isoformat() + "Z ===", file=logf)
+                logf.flush()
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd="/root/seo-scraper",
+                    env=env,
+                    stdout=logf,
+                    stderr=logf,
+                    start_new_session=True,
+                )
+                proc.wait()
+                print("=== Pipeline finished " + datetime.utcnow().isoformat() + "Z rc=" + str(proc.returncode) + " ===", file=logf)
+        except Exception as e:
+            with open(log_path, "a") as logf:
+                print("=== Pipeline error: " + str(e) + " ===", file=logf)
         finally:
             _pipeline_lock.release()
 
-    t = threading.Thread(target=_run, daemon=True)
+    t = threading.Thread(target=_run, daemon=False)
     t.start()
 
     started_at = datetime.utcnow().isoformat() + "Z"

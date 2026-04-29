@@ -135,6 +135,45 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_serp_snapshots_product   ON serp_snapshots(our_product_id);
         CREATE INDEX IF NOT EXISTS idx_product_snapshots_prod   ON product_snapshots(product_id);
         CREATE INDEX IF NOT EXISTS idx_competitor_products_comp ON competitor_products(competitor_id);
+
+        -- ---------------------------------------------------------------
+        -- Etsy competitor scraping tables
+        -- ---------------------------------------------------------------
+
+        CREATE TABLE IF NOT EXISTS etsy_serp_results (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            query       TEXT NOT NULL,
+            position    INTEGER NOT NULL,
+            listing_id  TEXT,
+            url         TEXT NOT NULL,
+            title       TEXT,
+            price_usd   REAL,
+            shop        TEXT,
+            reviews     INTEGER,
+            star_seller INTEGER DEFAULT 0,
+            scraped_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(query, position)
+        );
+
+        CREATE TABLE IF NOT EXISTS etsy_listings (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            listing_id  TEXT UNIQUE,
+            url         TEXT UNIQUE NOT NULL,
+            title       TEXT,
+            price_usd   REAL,
+            shop        TEXT,
+            materials   TEXT,
+            tags        TEXT,
+            reviews     INTEGER,
+            favorites   INTEGER,
+            metal_type  TEXT,
+            karat       TEXT,
+            confidence  TEXT,
+            scraped_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_etsy_serp_query  ON etsy_serp_results(query);
+        CREATE INDEX IF NOT EXISTS idx_etsy_listing_url ON etsy_listings(url);
     ''')
     conn.commit()
     conn.close()

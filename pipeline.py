@@ -26,6 +26,8 @@ from db import init_db, get_conn
 from crawlers.serp_crawler import scrape_serp, save_serp_results
 from extraction.classifier import classify_unprocessed
 from monitoring.delta import detect_deltas
+from crawlers.etsy_serp_crawler import scrape_etsy_serp, save_etsy_serp_results
+from extraction.etsy_extractor import process_etsy_listings
 
 PROXY_SERP    = os.environ.get('PROXY_SERP', '')
 PROXY_PRODUCT = os.environ.get('PROXY_PRODUCT', '')
@@ -253,10 +255,14 @@ def main():
     parser = argparse.ArgumentParser(description='SEO Scraper Pipeline')
     parser.add_argument('--keywords', default='data/keywords.json', help='Path to keywords JSON')
     parser.add_argument('--skip-serp',      action='store_true', help='Skip SERP crawl')
-    parser.add_argument('--skip-pages',     action='store_true', help='Skip product page crawl')
+    parser.add_argument('--skip-pages',     action='store_true', help='Skip product page crawl (Playwright)')
+    parser.add_argument('--pages-limit',     type=int, default=0, help='Max URLs to Playwright-crawl per run (0=skip)')
     parser.add_argument('--skip-classify',  action='store_true', help='Skip classification')
     parser.add_argument('--skip-delta',     action='store_true', help='Skip delta detection')
     parser.add_argument('--classify-limit', type=int, default=50, help='Max pages to classify per run')
+    parser.add_argument('--etsy',           action='store_true', help='Run Etsy SERP + listing crawl')
+    parser.add_argument('--etsy-keywords',  default='data/etsy_keywords.json', help='Path to Etsy keywords JSON')
+    parser.add_argument('--etsy-limit',     type=int, default=50, help='Max Etsy listings to fetch per run')
     args = parser.parse_args()
 
     print('Initialising DB...')
@@ -280,12 +286,17 @@ def main():
         print('\nStep 1b: Saving SERP snapshots + competitor registry')
         save_serp_snapshots(results, query_product_map)
 
-    if not args.skip_pages:
+    skip_pages = args.skip_pages or (args.pages_limit == 0)
+    if not skip_pages:
         print('\nStep 2: Product page crawl')
         urls = get_product_urls_from_db()
-        print(f'  {len(urls)} new URLs to fetch')
+        if args.pages_limit and args.pages_limit > 0:
+            urls = urls[:args.pages_limit]
+        print(f'  {len(urls)} URLs to fetch (limit={args.pages_limit})')
         if urls:
             asyncio.run(crawl_product_pages(urls))
+    else:
+        print('\nStep 2: Skipping Playwright page crawl (pages-limit=0)')
 
     if not args.skip_classify:
         print(f'\nStep 3: Classify + save product snapshots (limit={args.classify_limit})')
@@ -294,6 +305,24 @@ def main():
     if not args.skip_delta:
         print('\nStep 4: Delta detection')
         detect_deltas()
+
+    if args.etsy:
+        print(f'\nStep 5: Etsy SERP crawl from {args.etsy_keywords}')
+        with open(args.etsy_keywords) as f:
+            etsy_items = json.load(f)
+        etsy_queries = []
+        seen_q: set = set()
+        for item in etsy_items:
+            for q in item.get('queries', []):
+                if q not in seen_q:
+                    seen_q.add(q)
+                    etsy_queries.append(q)
+        print(f'  {len(etsy_queries)} unique Etsy queries')
+        etsy_results = scrape_etsy_serp(etsy_queries)
+        save_etsy_serp_results(etsy_results)
+
+        print(f'\nStep 6: Etsy listing extraction (limit={args.etsy_limit})')
+        process_etsy_listings(limit=args.etsy_limit)
 
     print_summary()
 
