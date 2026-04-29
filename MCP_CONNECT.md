@@ -66,6 +66,8 @@ You'll only see this once; the token is stored and reused.
 
 ## Available Tools
 
+### Google / General
+
 | Tool | Description |
 |------|-------------|
 | `scraper_get_stats` | DB overview: row counts, last run, keywords covered, metal breakdown |
@@ -73,8 +75,18 @@ You'll only see this once; the token is stored and reused.
 | `scraper_get_metal_breakdown` | % solid gold vs plated vs vermeil in SERP for given keywords |
 | `scraper_list_serp_results` | Raw Google results for a specific query |
 | `scraper_get_product_classification` | Full classification for a specific competitor URL |
+| `scraper_get_serp_history` | Historical SERP positions for a keyword over time |
+| `scraper_get_competitor_products` | All tracked URLs for a competitor domain |
+| `scraper_get_price_history` | Price history for a specific competitor product |
 | `scraper_get_delta_changes` | Week-over-week price/metal_type changes detected |
 | `scraper_run_pipeline` | Trigger a fresh scrape run (non-blocking, runs in background) |
+
+### Etsy
+
+| Tool | Description |
+|------|-------------|
+| `scraper_list_etsy_serp` | Ranked Etsy listings for a query — price, shop, reviews, star_seller, metal classification |
+| `scraper_get_etsy_competitor_intel` | Full Etsy competitor view — rank + shop + materials/tags + metal type + karat |
 
 ---
 
