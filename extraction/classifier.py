@@ -142,15 +142,17 @@ def _fetch_html(url: str, retries: int = 3) -> str:
 # ---------------------------------------------------------------------------
 
 def _classify_text(page_text: str) -> dict:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    proxy_url = 'http://127.0.0.1:3456'
+    client = anthropic.Anthropic(api_key='unused', base_url=proxy_url)
     prompt = EXTRACTION_PROMPT.replace('{page_text}', page_text)
-    msg = client.messages.create(
+    with client.messages.stream(
         model='claude-haiku-4-5-20251001',
         max_tokens=512,
         system=SYSTEM_PROMPT,
         messages=[{'role': 'user', 'content': prompt}],
-    )
-    raw = msg.content[0].text.strip()
+    ) as stream:
+        msg = stream.get_final_message()
+    raw = next(b.text for b in msg.content if b.type == 'text').strip()
     raw = re.sub(r'^```[a-z]*\n?', '', raw)
     raw = re.sub(r'\n?```$', '', raw)
     return json.loads(raw)
