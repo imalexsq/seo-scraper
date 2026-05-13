@@ -272,9 +272,12 @@ def _fallback(reason: str = '') -> dict:
 def classify_unprocessed(limit: int = 50):
     conn = get_conn()
     rows = conn.execute('''
-        SELECT p.url FROM product_pages p
-        LEFT JOIN classifications c ON p.url = c.url
+        SELECT DISTINCT s.url FROM serp_results s
+        LEFT JOIN classifications c ON s.url = c.url
         WHERE c.url IS NULL
+        AND s.url NOT LIKE '%ellacreationsjewelry.com%'
+        AND s.url NOT LIKE '%yasminnabulsi.com%'
+        ORDER BY s.scraped_at DESC
         LIMIT ?
     ''', (limit,)).fetchall()
     conn.close()
